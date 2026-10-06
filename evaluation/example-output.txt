@@ -1,0 +1,14 @@
+# Real output of the README "Quick start" example, run in a temporary directory
+# manifest:
+{"task": "fix scheduler timezone bug", "checks": [
+ {"type": "file_contains", "path": "app/scheduler.py", "substring": "as_naive"},
+ {"type": "file_exists", "path": "app/scheduler.py.bak-*"},
+ {"type": "sqlite_scalar", "db": "data/app.db", "query": "SELECT count(*) FROM jobs WHERE status='failed'", "op": "==", "value": 0},
+ {"type": "output_fresh", "path": "out/report-*.csv", "max_age_hours": 24, "min_size": 100}]}
+# output:
+🔴 FAIL  fix scheduler timezone bug  (3/4 checks)
+  ✓ file_contains: contains
+  ✓ file_exists: exists: app/scheduler.py.bak-1006 (22B)
+  ✗ sqlite_scalar: mismatch: actual=3 expected ==0 
+  ✓ output_fresh: report-1006.csv 2405B / 0.0h old
+exit=1

@@ -1,0 +1,67 @@
+{
+  "seed": 20261006,
+  "n_types": 8,
+  "n_per_type": 20,
+  "n_truthful": 20,
+  "n_false": 160,
+  "false_fail_rate": 0.0,
+  "detection_rate": 1.0,
+  "failed_only_on_injected_claim": 160,
+  "by_type": [
+    {
+      "type": "truthful",
+      "n": 20,
+      "failed": 0,
+      "failed_only_on_injected_claim": null
+    },
+    {
+      "type": "file_never_created",
+      "n": 20,
+      "failed": 20,
+      "failed_only_on_injected_claim": 20
+    },
+    {
+      "type": "edit_never_made",
+      "n": 20,
+      "failed": 20,
+      "failed_only_on_injected_claim": 20
+    },
+    {
+      "type": "row_count_overstated",
+      "n": 20,
+      "failed": 20,
+      "failed_only_on_injected_claim": 20
+    },
+    {
+      "type": "stale_output",
+      "n": 20,
+      "failed": 20,
+      "failed_only_on_injected_claim": 20
+    },
+    {
+      "type": "empty_output",
+      "n": 20,
+      "failed": 20,
+      "failed_only_on_injected_claim": 20
+    },
+    {
+      "type": "silent_no_op",
+      "n": 20,
+      "failed": 20,
+      "failed_only_on_injected_claim": 20
+    },
+    {
+      "type": "backup_not_taken",
+      "n": 20,
+      "failed": 20,
+      "failed_only_on_injected_claim": 20
+    },
+    {
+      "type": "deleted_file_still_there",
+      "n": 20,
+      "failed": 20,
+      "failed_only_on_injected_claim": 20
+    }
+  ],
+  "violations": []
+}

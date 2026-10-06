@@ -1,0 +1,74 @@
+{
+ "note": "Every number that appears in README.md / README.ja.md, and where it comes from. Checked by the release gate before publishing.",
+ "numbers": [
+  {
+   "values": [
+    "160",
+    "20",
+    "8",
+    "0"
+   ],
+   "source": "file:evaluation/benchmark-result.json",
+   "what": "benchmark: 8 false-claim types x 20, truthful 20, failures"
+  },
+  {
+   "values": [
+    "3.9",
+    "3.11",
+    "3.13",
+    "3.14"
+   ],
+   "source": "file:evaluation/benchmark-matrix.txt",
+   "what": "Python versions the benchmark was run on"
+  },
+  {
+   "values": [
+    "3",
+    "4",
+    "1006",
+    "24",
+    "100"
+   ],
+   "source": "file:evaluation/example-output.txt",
+   "what": "Quick start example output (3/4 checks) and the manifest values shown with it"
+  },
+  {
+   "values": [
+    "0",
+    "1"
+   ],
+   "source": "file:claim_gate.py",
+   "what": "exit codes"
+  },
+  {
+   "values": [
+    "3"
+   ],
+   "source": "file:pyproject.toml",
+   "what": "Python 3"
+  },
+  {
+   "values": [
+    "1",
+    "2"
+   ],
+   "source": "label",
+   "what": "list numbering"
+  },
+  {
+   "values": [
+    "4",
+    "7"
+   ],
+   "source": "internal:2026-06-24 trial record (internal operations log, not published)",
+   "what": "first internal trial: 4 known-false claims, 7 real pieces of work"
+  },
+  {
+   "values": [
+    "180"
+   ],
+   "source": "label",
+   "what": "160 false + 20 truthful manifests (benchmark-result.json n_false + n_truthful)"
+  }
+ ]
+}

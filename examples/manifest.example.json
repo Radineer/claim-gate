@@ -1,0 +1,11 @@
+{
+  "task": "fix scheduler timezone bug",
+  "checks": [
+    {"type": "file_contains", "path": "app/scheduler.py", "substring": "as_naive", "label": "the fix is in the code"},
+    {"type": "file_exists",   "path": "app/scheduler.py.bak-*", "label": "a backup was taken"},
+    {"type": "sqlite_scalar", "db": "data/app.db",
+     "query": "SELECT count(*) FROM jobs WHERE status='failed'", "op": "==", "value": 0, "label": "no failed jobs left"},
+    {"type": "output_fresh",  "path": "out/report-*.csv", "max_age_hours": 24, "min_size": 100, "label": "today's report exists"},
+    {"type": "log_not_contains", "path": "logs/job.log", "substring": ["inserted=0", "Traceback"], "tail_lines": 50}
+  ]
+}

@@ -1,0 +1,24 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "claim-gate"
+version = "0.1.0"
+description = "Verify an AI agent's 'done' claims against the real system, deterministically."
+readme = "README.md"
+license = {text = "MIT"}
+requires-python = ">=3.9"
+dependencies = []
+classifiers = [
+  "License :: OSI Approved :: MIT License",
+  "Programming Language :: Python :: 3",
+  "Topic :: Software Development :: Testing",
+  "Topic :: Security",
+]
+
+[project.scripts]
+claim-gate = "claim_gate:main"
+
+[tool.setuptools]
+py-modules = ["claim_gate"]

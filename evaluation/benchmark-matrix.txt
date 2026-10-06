@@ -1,0 +1,4 @@
+Python 3.9: detection rate  : 160/160 false-fail rate : 0/20 failed only on the injected claim: 160/160 
+Python 3.11: detection rate  : 160/160 false-fail rate : 0/20 failed only on the injected claim: 160/160 
+Python 3.13: detection rate  : 160/160 false-fail rate : 0/20 failed only on the injected claim: 160/160 
+Python 3.14: detection rate  : 160/160 false-fail rate : 0/20 failed only on the injected claim: 160/160 
