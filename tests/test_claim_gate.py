@@ -114,6 +114,91 @@ class ClaimGateTest(unittest.TestCase):
         self.assertEqual(r.returncode, 2)
         self.assertFalse(json.loads(r.stdout)["passed"])
 
+    def test_wal_database_with_no_side_files_can_be_read(self):
+        # Found on a production database: a WAL-mode SQLite file that nobody has open has no -shm file,
+        # and a read-only connection cannot create one ("unable to open database file").
+        db = os.path.join(self.d, "wal.db")
+        con = sqlite3.connect(db)
+        con.execute("PRAGMA journal_mode=WAL")
+        con.execute("CREATE TABLE t(x)")
+        con.execute("INSERT INTO t VALUES (5)")
+        con.commit()
+        con.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+        con.close()
+        for side in ("-wal", "-shm"):  # the state seen in production: no side files while nobody has it open
+            if os.path.exists(db + side):
+                os.remove(db + side)
+        # Whether mode=ro can open this state depends on the SQLite version and directory permissions;
+        # either way the check must read the value. The fallback branch itself is forced in the next test.
+        with open(db, "rb") as f:
+            before = f.read()
+        r = self.run_gate([{"type": "sqlite_scalar", "db": db, "query": "SELECT x FROM t", "op": "==", "value": 5}])
+        self.assertTrue(r["passed"], r["results"][0]["detail"])
+        conn = claim_gate._ro_connect(db)  # whichever connection was used still refuses writes
+        try:
+            with self.assertRaises(sqlite3.OperationalError):
+                conn.execute("INSERT INTO t VALUES (6)")
+        finally:
+            conn.close()
+        with open(db, "rb") as f:
+            self.assertEqual(f.read(), before)  # the data file is unchanged
+
+    def test_wal_fallback_branch_is_taken_and_refuses_writes(self):
+        db = os.path.join(self.d, "wal2.db")
+        con = sqlite3.connect(db)
+        con.execute("PRAGMA journal_mode=WAL")
+        con.execute("CREATE TABLE t(x)")
+        con.execute("INSERT INTO t VALUES (5)")
+        con.commit()
+        con.close()
+        real = sqlite3.connect
+        used = []
+
+        class FailingRO:  # fails the way mode=ro did on the production database
+            def execute(self, *a):
+                raise sqlite3.OperationalError("unable to open database file")
+
+            def close(self):
+                pass
+
+        def fake(target, *a, **kw):
+            used.append(target)
+            if isinstance(target, str) and "mode=ro" in target:
+                return FailingRO()
+            return real(target, *a, **kw)
+
+        def fake_connect_fails(target, *a, **kw):  # the connect call itself raises
+            used.append(target)
+            if isinstance(target, str) and "mode=ro" in target:
+                raise sqlite3.OperationalError("unable to open database file")
+            return real(target, *a, **kw)
+        claim_gate.sqlite3.connect = fake_connect_fails
+        try:
+            conn = claim_gate._ro_connect(db)
+            self.assertEqual(conn.execute("SELECT x FROM t").fetchone()[0], 5)
+            conn.close()
+        finally:
+            claim_gate.sqlite3.connect = real
+        used.clear()
+        claim_gate.sqlite3.connect = fake
+        try:
+            conn = claim_gate._ro_connect(db)
+            self.assertTrue(any("mode=rw" in str(u) for u in used), used)
+            self.assertEqual(conn.execute("SELECT x FROM t").fetchone()[0], 5)
+            with self.assertRaises(sqlite3.OperationalError):
+                conn.execute("INSERT INTO t VALUES (6)")
+            conn.close()
+        finally:
+            claim_gate.sqlite3.connect = real
+
+    def test_non_wal_open_failure_does_not_fall_back(self):
+        bad = os.path.join(self.d, "not_sqlite.db")
+        with open(bad, "w") as f:
+            f.write("this is not a database")
+        r = self.run_gate([{"type": "sqlite_scalar", "db": bad, "query": "SELECT 1", "op": "==", "value": 1}])
+        self.assertFalse(r["passed"])
+        self.assertFalse(claim_gate._is_wal_file(bad))
+
     def test_unknown_check_type_fails(self):
         self.assertFalse(self.run_gate([{"type": "trust_me"}])["passed"])
 

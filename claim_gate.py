@@ -5,7 +5,8 @@ An agent's completion report is generated text, not an execution result. claim-g
 machine-readable manifest of claims (files, DB rows, processes, git changes, outputs, HTTP status,
 logs) against primary data. If any single check fails, the whole manifest fails (exit code 1).
 
-Does not change your data by design: SQL is a SELECT on a read-only connection, git runs without
+Does not change your data by design: SQL is a SELECT on a mode=ro connection (mode=rw + query_only only
+when a WAL-mode file fails to open read-only), git runs without
 optional locks, process checks only observe (pgrep / pm2 jlist), HTTP checks use GET.
 Caveats: reading a WAL-mode SQLite database may create its -wal/-shm side files; `pm2 jlist` starts
 the pm2 daemon if it is not running; a GET is only as side-effect free as the server; the external
@@ -151,12 +152,39 @@ def check_file_contains(c):
     return False, "substring/regex not given"
 
 
+def _is_wal_file(db):
+    """SQLite header bytes 18 and 19 are both 2 for a WAL-mode database."""
+    try:
+        with open(db, "rb") as f:
+            head = f.read(20)
+    except OSError:
+        return False
+    return head[:16] == b"SQLite format 3\x00" and head[18:20] == b"\x02\x02"
+
+
 def _ro_connect(db):
-    """A connection that cannot write: mode=ro on the file, plus query_only on the connection.
+    """A connection that cannot change the data: mode=ro on the file (or mode=rw for a WAL file with no
+    side files, see below), plus query_only on the connection.
 
     The path is percent-encoded so "#" or "?" in a file name cannot change the URI (and drop mode=ro).
     """
-    conn = sqlite3.connect("file:%s?mode=ro" % urllib.parse.quote(os.path.abspath(db)), uri=True, timeout=20)
+    path = urllib.parse.quote(os.path.abspath(db))
+    conn = None
+    try:
+        conn = sqlite3.connect("file:%s?mode=ro" % path, uri=True, timeout=20)
+        conn.execute("PRAGMA query_only=ON")
+        conn.execute("SELECT 1 FROM sqlite_master LIMIT 1").fetchall()
+        return conn
+    except sqlite3.Error as e:  # always close, whatever went wrong (e.g. "file is not a database")
+        if conn is not None:
+            conn.close()
+        # A WAL-mode file with no -shm file can fail to open read-only (seen on a production database).
+        # Only that case falls back; any other error is a failed check.
+        if not isinstance(e, sqlite3.OperationalError) or "unable to open" not in str(e) or not _is_wal_file(db):
+            raise
+    # Fallback: a normal connection that refuses writes (query_only). mode=rw never creates a missing
+    # database; SQLite may create its -wal/-shm side files, the data itself is not changed.
+    conn = sqlite3.connect("file:%s?mode=rw" % path, uri=True, timeout=20)
     conn.execute("PRAGMA query_only=ON")
     return conn
 
