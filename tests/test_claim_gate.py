@@ -156,6 +156,14 @@ class ClaimGateTest(unittest.TestCase):
         r = self.run_gate([{"type": "sqlite_scalar", "db": self.db, "query": "SELECT count(*) FROM jobs"}])
         self.assertFalse(r["passed"])
 
+    def test_url_globbing_is_off(self):
+        b = self._fake_command("curl", 'for a in "$@"; do [ "$a" = "--globoff" ] && { printf 404; exit 0; }; done; printf 200200\n')
+        r = self._with_path(b, [{"type": "http_status", "url": "http://example.invalid/[1-2]", "op": "!=", "value": 200}])
+        self.assertTrue(r["passed"])  # with --globoff the fake answers one 404
+        b = self._fake_command("curl", "printf 200200\n")
+        r = self._with_path(b, [{"type": "http_status", "url": "http://example.invalid/x", "op": "!=", "value": 200}])
+        self.assertFalse(r["passed"])  # two codes glued together are never one status
+
     def test_url_cannot_smuggle_curl_options(self):
         r = self.run_gate([{"type": "http_status", "url": "--config=/dev/null", "op": "!=", "value": 200}])
         self.assertFalse(r["passed"])
@@ -166,6 +174,14 @@ class ClaimGateTest(unittest.TestCase):
         subprocess.run(["git", "init", "-q", repo], check=True)
         r = self.run_gate([{"type": "git_changed", "repo": repo, "path": "-h"}])
         self.assertFalse(r["passed"])
+        with open(os.path.join(repo, "a.txt"), "w") as f:
+            f.write("x")
+        subprocess.run(["git", "-C", repo, "add", "a.txt"], check=True)
+        subprocess.run(["git", "-C", repo, "-c", "user.name=t", "-c", "user.email=t@example.invalid",
+                        "commit", "-qm", "c"], check=True)
+        r = self.run_gate([{"type": "git_changed", "repo": repo, "path": ":(exclude)no_such_file"}])
+        self.assertFalse(r["passed"])
+        self.assertTrue(self.run_gate([{"type": "git_changed", "repo": repo, "path": "a.txt"}])["passed"])
 
     def test_dangling_symlink_is_not_absent(self):
         link = os.path.join(self.d, "legacy_link")

@@ -96,6 +96,17 @@ Each false case differs from the truthful one in exactly one thing: one extra fa
 python3 evaluation/benchmark.py
 ```
 
+## Related work
+
+claim-gate is not a new idea. It is a small, dependency-free version of things that already exist:
+
+- **Server state testing.** [goss](https://github.com/goss-org/goss), [Serverspec](https://serverspec.org/), [Chef InSpec](https://github.com/inspec/inspec) and [Testinfra](https://github.com/pytest-dev/pytest-testinfra) check a declared state (files, processes, services, HTTP) against a real machine and fail with an exit code. claim-gate uses the same mechanism; the difference is only that the declaration is the receiving side's acceptance check for an AI agent's report.
+- **State-based grading of agents.** Benchmarks such as [τ-bench](https://arxiv.org/abs/2406.12045), [AppWorld](https://aclanthology.org/2024.acl-long.850/) and [OSWorld](https://arxiv.org/abs/2404.07972) score an agent by the final state of its environment, not by what it says.
+- **False success in agents.** [Advani (2026)](https://arxiv.org/abs/2606.09863) measures agents that report completion while the state says otherwise, and finds LLM judges unreliable at detecting it. [Smyth et al. (2026)](https://arxiv.org/abs/2609.20812) measure overclaiming against the agent's own transcript. [Zhu et al. (2026)](https://arxiv.org/abs/2609.35732) reduce false success with a structured evidence contract. [Nguyen and Tran (2026)](https://arxiv.org/abs/2605.17998) describe a runtime where agents propose completion and a read-only verifier decides admission, which is the same design as claim-gate.
+- **Similar tools.** [agent-completion-verifier](https://github.com/Luca-1304/agent-completion-verifier) and [AgentVerify](https://github.com/aliasfoxkde/AgentVerify) check completion claims deterministically against state; [agent-claimcheck](https://github.com/B0yko/agent-claimcheck) combines rules, a classifier and an LLM judge over traces. If you need signed receipts, trace adapters or classifiers, look at those.
+
+What claim-gate adds is small: one file with only the Python standard library, check types aimed at unattended jobs (SQLite rows, pm2, fresh outputs, "did nothing" log lines), and failing closed when a claim cannot be checked.
+
 ## Limits
 
 - It only sees what the manifest names. Changes nobody declared are invisible.

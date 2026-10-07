@@ -1,0 +1,16 @@
+# Links cited in README "Related work", fetched 2026-10-07 (HTTP status, URL)
+200 https://aclanthology.org/2024.acl-long.850/
+200 https://arxiv.org/abs/2404.07972
+200 https://arxiv.org/abs/2406.12045
+200 https://arxiv.org/abs/2605.17998
+200 https://arxiv.org/abs/2606.09863
+200 https://arxiv.org/abs/2609.20812
+200 https://arxiv.org/abs/2609.35732
+200 https://github.com/B0yko/agent-claimcheck
+200 https://github.com/Luca-1304/agent-completion-verifier
+200 https://github.com/aliasfoxkde/AgentVerify
+200 https://github.com/goss-org/goss
+200 https://github.com/inspec/inspec
+200 https://github.com/pytest-dev/pytest-testinfra
+200 https://serverspec.org/
+# years cited: Advani 2026, Smyth et al. 2026, Zhu et al. 2026, Nguyen and Tran 2026; τ-bench 2024, AppWorld ACL 2024, OSWorld 2024

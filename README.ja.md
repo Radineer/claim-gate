@@ -77,6 +77,17 @@ python3 claim_gate.py manifest.json --json   # 結果をJSONで
 python3 evaluation/benchmark.py
 ```
 
+## 先行研究・類似の道具
+
+claim-gate は新しい考えではありません。すでにあるものを、依存なしの小さな形にしたものです。
+
+- **サーバの状態の検査。** [goss](https://github.com/goss-org/goss)・[Serverspec](https://serverspec.org/)・[Chef InSpec](https://github.com/inspec/inspec)・[Testinfra](https://github.com/pytest-dev/pytest-testinfra) は、宣言した状態（ファイル・プロセス・サービス・HTTP）を実機と照合し、終了コードで落とします。claim-gate の仕組みは同じで、違うのは、宣言が「AIの報告を受け取る側の受け入れ条件」だという点だけです。
+- **状態によるエージェントの採点。** [τ-bench](https://arxiv.org/abs/2406.12045)・[AppWorld](https://aclanthology.org/2024.acl-long.850/)・[OSWorld](https://arxiv.org/abs/2404.07972) などのベンチマークは、エージェントの発言ではなく環境の最終状態で採点します。
+- **エージェントの偽の成功。** [Advani (2026)](https://arxiv.org/abs/2606.09863) は、完了と言うのに状態は違うエージェントを測り、LLM の判定ではうまく見抜けないことを示しています。[Smyth ほか (2026)](https://arxiv.org/abs/2609.20812) はエージェント自身の作業記録との食い違いを、[Zhu ほか (2026)](https://arxiv.org/abs/2609.35732) は証拠を出させる取り決めで偽の成功を減らすことを報告しています。[Nguyen・Tran (2026)](https://arxiv.org/abs/2605.17998) は「エージェントは完了を提案するだけで、読み取り専用の検証器が受け入れを決める」仕組みを述べており、claim-gate と同じ設計です。
+- **似た道具。** [agent-completion-verifier](https://github.com/Luca-1304/agent-completion-verifier) と [AgentVerify](https://github.com/aliasfoxkde/AgentVerify) は完了の主張を状態と決定的に照合し、[agent-claimcheck](https://github.com/B0yko/agent-claimcheck) は作業記録を規則・分類器・LLM の判定で照合します。署名つきの記録・作業記録の取り込み・分類器が要るなら、そちらを見てください。
+
+claim-gate が足しているのは小さなことです。Python の標準ライブラリだけの1ファイルであること、無人の処理向けの項目（SQLite の行・pm2・新しい成果物・「何もしなかった」ログ）があること、確かめられない主張を不合格にすることです。
+
 ## 限界
 
 - マニフェストに書かれた項目しか見ません。申告されていない変更は見えません。

@@ -69,6 +69,21 @@
    ],
    "source": "label",
    "what": "160 false + 20 truthful manifests (benchmark-result.json n_false + n_truthful)"
+  },
+  {
+   "values": [
+    "2606.09863",
+    "2609.20812",
+    "2609.35732",
+    "2605.17998",
+    "2406.12045",
+    "2404.07972",
+    "2024",
+    "2026",
+    "1304"
+   ],
+   "source": "file:evaluation/related-work-links.txt",
+   "what": "Related work: arXiv IDs, publication years and the URL of agent-completion-verifier (Luca-1304), each link fetched"
   }
  ]
 }

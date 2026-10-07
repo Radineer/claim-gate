@@ -221,12 +221,13 @@ def check_process_running(c):
 def check_git_changed(c):
     """True if `path` in `repo` has a working-tree change or any commit touching it (read-only)."""
     repo = c["repo"]; path = c.get("path", "")
-    spec = ["--", path] if path else []  # "--": a path like "-h" is a path, never an option
+    # "--" and --literal-pathspecs: "-h" or ":(exclude)x" is a file name, never an option or pathspec magic
+    spec = ["--", path] if path else []
     try:
         # --no-optional-locks: do not refresh the index while looking.
-        rs = subprocess.run(["git", "--no-optional-locks", "-c", "core.fsmonitor=false", "-C", repo, "status", "--porcelain"] + spec,
+        rs = subprocess.run(["git", "--no-optional-locks", "--literal-pathspecs", "-c", "core.fsmonitor=false", "-C", repo, "status", "--porcelain"] + spec,
                             capture_output=True, text=True, timeout=20)
-        rl = subprocess.run(["git", "--no-optional-locks", "-c", "core.fsmonitor=false", "-C", repo, "log", "-1", "--oneline"] + spec,
+        rl = subprocess.run(["git", "--no-optional-locks", "--literal-pathspecs", "-c", "core.fsmonitor=false", "-C", repo, "log", "-1", "--oneline"] + spec,
                             capture_output=True, text=True, timeout=20)
     except Exception as e:
         return False, f"git failed: {e}"
@@ -298,10 +299,12 @@ def check_http_status(c):
     try:
         r = subprocess.run(
             # -q (must be first): ignore ~/.curlrc, so no config can turn this into a write or a PUT/POST.
-            ["curl", "-q", "-s", "-o", "/dev/null", "-w", "%{http_code}", "-L", "--proto", "=http,https",
+            ["curl", "-q", "-s", "--globoff", "-o", "/dev/null", "-w", "%{http_code}", "-L", "--proto", "=http,https",
              "-m", str(c.get("timeout", 20)), "--url", url],
             capture_output=True, text=True, timeout=float(c.get("timeout", 20)) + 10)
-        code = int(r.stdout.strip() or 0)
+        out = r.stdout.strip()
+        # exactly one 3-digit status: "[1-2]" globbing is off, but never trust a concatenated "200200"
+        code = int(out) if len(out) == 3 and out.isdigit() else 0
     except Exception as e:  # noqa: BLE001
         return False, f"fetch failed: {e}"
     # No HTTP response at all (DNS, refused, timeout) is never a pass, whatever op/value say.
