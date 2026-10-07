@@ -1,0 +1,47 @@
+{
+ "what": "Receiver-written manifests on tau2-bench (MIT) public leaderboard trajectories: 120 runs (60 false successes, 60 correct), 67 tasks. Manifests written by three LLMs from the customer request, the policy and the pre-work records. 'base' = as written; 'filtered' = checks with bad syntax dropped and checks that failed on any known-correct earlier run of the same task dropped (105/120 runs had such runs). Counts are [false successes rejected, false successes, correct runs rejected, correct runs]. Methods and the sample were pre-registered before the manifests were written.",
+ "writers": {
+  "gpt-5.5": {
+   "base": [
+    37,
+    60,
+    19,
+    60
+   ],
+   "filtered": [
+    33,
+    60,
+    0,
+    60
+   ]
+  },
+  "gpt-6-astra": {
+   "base": [
+    41,
+    60,
+    38,
+    60
+   ],
+   "filtered": [
+    27,
+    60,
+    2,
+    60
+   ]
+  },
+  "claude": {
+   "base": [
+    30,
+    60,
+    7,
+    60
+   ],
+   "filtered": [
+    28,
+    60,
+    1,
+    60
+   ]
+  }
+ }
+}

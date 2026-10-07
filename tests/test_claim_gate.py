@@ -199,6 +199,119 @@ class ClaimGateTest(unittest.TestCase):
         self.assertFalse(r["passed"])
         self.assertFalse(claim_gate._is_wal_file(bad))
 
+    def test_known_good_runs_turn_unsound_checks_into_warnings(self):
+        sound = {"type": "file_exists", "path": self.src, "label": "src"}
+        unsound = {"type": "file_contains", "path": self.src, "substring": "never there", "label": "too strict"}
+        # A run someone confirmed correct, in which "too strict" failed: that check is not trusted any more.
+        k_src, k_strict = claim_gate.check_key(sound), claim_gate.check_key(unsound)
+        known_good = [{"task": "job", "results": [{"key": k_src, "ok": True}, {"key": k_strict, "ok": False, "observed": True}]}]
+        rep = claim_gate.verify({"task": "job", "checks": [sound, unsound]}, known_good=known_good)
+        self.assertTrue(rep["passed"])
+        self.assertEqual([r.get("ignored", False) for r in rep["results"]], [False, True])
+        # The same check without that history still fails the manifest.
+        self.assertFalse(claim_gate.verify({"checks": [sound, unsound]})["passed"])
+
+    def test_a_sound_failing_check_still_fails(self):
+        bad = {"type": "file_exists", "path": self.src + ".nope", "label": "missing"}
+        known_good = [{"task": "job", "results": [{"key": "other#000000000000", "ok": False, "observed": True}]}]
+        self.assertFalse(claim_gate.verify({"task": "job", "checks": [bad]}, known_good=known_good)["passed"])
+
+    def test_nothing_left_after_ignoring_fails_closed(self):
+        unsound = {"type": "file_contains", "path": self.src, "substring": "never there", "label": "x"}
+        known_good = [{"task": "job", "results": [{"key": claim_gate.check_key(unsound), "ok": False, "observed": True}]}]
+        rep = claim_gate.verify({"task": "job", "checks": [unsound]}, known_good=known_good)
+        self.assertFalse(rep["passed"])
+        # An untrusted check that happens to pass this time does not count as a trusted pass either.
+        passing_untrusted = {"type": "file_exists", "path": self.src, "label": "y"}
+        kg = [{"task": "job", "results": [{"key": claim_gate.check_key(passing_untrusted), "ok": False, "observed": True}]}]
+        self.assertFalse(claim_gate.verify({"task": "job", "checks": [passing_untrusted]}, known_good=kg)["passed"])
+
+    def test_history_needs_a_named_task_and_cannot_excuse_malformed_checks(self):
+        c = {"type": "file_contains", "path": self.src, "substring": "never there", "label": "x"}
+        kg = [{"task": "", "results": [{"key": claim_gate.check_key(c), "ok": False, "observed": True}]}]
+        self.assertFalse(claim_gate.verify({"checks": [c]}, known_good=kg)["passed"])  # no task name: nothing untrusted
+        bad = {"type": "trust_me", "label": "b"}
+        ok = {"type": "file_exists", "path": self.src}
+        kg = [{"task": "job", "results": [{"key": claim_gate.check_key(bad), "ok": False, "observed": True}]}]
+        self.assertFalse(claim_gate.verify({"task": "job", "checks": [bad, ok]}, known_good=kg)["passed"])
+        for broken in ({"type": "file_exists", "label": "no path"},
+                       {"type": "file_contains", "path": self.src, "substring": "a", "regex": "b", "label": "both"},
+                       {"type": "sqlite_scalar", "db": self.db, "query": "SELECT 1", "label": "no op"},
+                       {"type": "http_status", "url": "ftp://x", "label": "scheme"},
+                       {"type": "glob_count", "path": self.src, "op": ">=", "value": "many", "label": "type"},
+                       {"type": "file_contains", "path": self.src + ".gone", "label": "no substring, missing file"},
+                       {"type": "file_contains", "path": self.src + ".gone", "regex": "[", "label": "bad regex"},
+                       {"type": "file_exists", "path": self.src, "min_szie": 10 ** 12, "label": "typo"},
+                       {"type": "glob_count", "path": self.src + ".gone", "max_age_hours": True, "op": "==", "value": 0, "label": "bool age"},
+                       {"type": "file_exists", "path": self.src + ".gone", "mtime_after": "invalid-date", "label": "bad date"},
+                       {"type": "glob_count", "path": self.src + ".gone*", "op": "~=", "value": 0, "label": "bad op"},
+                       {"type": "file_exists", "path": 42, "label": "path type"},
+                       {"type": "sqlite_scalar", "db": self.db + ".gone", "query": "SELECT 1", "op": "==", "value": [1], "label": "sql value"},
+                       {"type": "file_contains", "path": self.src + ".gone", "substring": ["x"], "label": "list substring"},
+                       {"type": "file_contains", "path": self.d, "substring": "x", "label": "unreadable (a directory)"},
+                       {"type": "sqlite_scalar", "db": self.db + ".gone", "query": "SELECT (", "op": "==", "value": 1, "label": "bad sql, no db"},
+                       {"type": "sqlite_scalar", "db": self.db + ".gone", "query": "SELECT * FROM missing; DELETE FROM jobs", "op": "==", "value": 1, "label": "two statements"},
+                       {"type": "sqlite_scalar", "db": self.db, "query": "SELECT nope FROM nowhere", "op": "==", "value": 1, "label": "sql"},
+                       {"type": "output_fresh", "path": self.src, "max_age_hours": None, "label": "null age"}):
+            kg = [{"task": "job", "results": [{"key": claim_gate.check_key(broken), "ok": False, "observed": True}]}]
+            rep = claim_gate.verify({"task": "job", "checks": [broken, ok]}, known_good=kg)
+            self.assertFalse(rep["passed"], broken)
+
+    def test_known_good_is_scoped_to_task_and_check_content(self):
+        c = {"type": "file_contains", "path": self.src, "substring": "never there", "label": "x"}
+        kg = [{"task": "other job", "results": [{"key": claim_gate.check_key(c), "ok": False, "observed": True}]}]
+        self.assertFalse(claim_gate.verify({"task": "this job", "checks": [c]}, known_good=kg)["passed"])
+        changed = dict(c, substring="also never there")
+        kg2 = [{"task": "this job", "results": [{"key": claim_gate.check_key(c), "ok": False, "observed": True}]}]
+        self.assertNotEqual(claim_gate.check_key(c), claim_gate.check_key(changed))
+        self.assertFalse(claim_gate.verify({"task": "this job", "checks": [changed]}, known_good=kg2)["passed"])
+
+    def test_history_failures_that_could_not_look_are_not_evidence(self):
+        c = {"type": "file_contains", "path": self.src, "substring": "never there", "label": "x"}
+        ok = {"type": "file_exists", "path": self.src}
+        kg = [{"task": "job", "results": [{"key": claim_gate.check_key(c), "ok": False, "observed": False}]}]
+        self.assertFalse(claim_gate.verify({"task": "job", "checks": [c, ok]}, known_good=kg)["passed"])
+        kg_old = [{"task": "job", "results": [{"key": claim_gate.check_key(c), "ok": False}]}]  # no "observed": not used
+        self.assertFalse(claim_gate.verify({"task": "job", "checks": [c, ok]}, known_good=kg_old)["passed"])
+
+    def test_broken_known_good_lines_are_skipped(self):
+        c = {"type": "file_exists", "path": self.src}
+        for kg in ([{"task": "t", "results": 1}], [{"task": "t", "results": [1, None, "x"]}], ["junk", 3],
+                   [{"task": "t", "results": [{"ok": False, "observed": True, "key": ["x"]}]}]):
+            rep = claim_gate.verify({"task": "t", "checks": [c]}, known_good=kg)
+            self.assertTrue(rep["passed"], kg)
+
+    def test_missing_parent_directory_means_no_matches(self):
+        gone = os.path.join(self.d, "missing", "*.txt")
+        r = self.run_gate([{"type": "file_absent", "path": gone},
+                           {"type": "glob_count", "path": gone, "op": "==", "value": 0}])
+        self.assertTrue(r["passed"], [x["detail"] for x in r["results"]])
+
+    def test_check_key_is_label_or_stable_hash(self):
+        a = {"type": "file_exists", "path": "/x"}
+        b = {"path": "/x", "type": "file_exists"}
+        self.assertEqual(claim_gate.check_key(a), claim_gate.check_key(b))
+        self.assertTrue(claim_gate.check_key(dict(a, label="L")).startswith("L#"))
+        self.assertEqual(claim_gate.check_key(dict(a, label="L")), claim_gate.check_key(dict(b, label="L")))
+
+    def test_history_and_known_good_on_the_cli(self):
+        man = os.path.join(self.d, "m.json")
+        hist = os.path.join(self.d, "history.jsonl")
+        with open(man, "w") as f:
+            json.dump({"task": "t", "checks": [{"type": "file_exists", "path": self.src, "label": "src"},
+                                              {"type": "file_contains", "path": self.src, "substring": "nope", "label": "strict"}]}, f)
+        r = subprocess.run([sys.executable, GATE, man, "--history", hist], capture_output=True, text=True)
+        self.assertEqual(r.returncode, 1)
+        line = json.loads(open(hist).read().splitlines()[-1])
+        self.assertEqual(sorted(x["ok"] for x in line["results"]), [False, True])
+        # Someone confirms that run was actually fine: copy its line into the known-good file.
+        good = os.path.join(self.d, "known-good.jsonl")
+        with open(good, "w") as f:
+            f.write(json.dumps(line) + "\n")
+        r = subprocess.run([sys.executable, GATE, man, "--known-good", good, "--json"], capture_output=True, text=True)
+        self.assertEqual(r.returncode, 0, r.stdout)
+        self.assertTrue(json.loads(r.stdout)["passed"])
+
     def test_unknown_check_type_fails(self):
         self.assertFalse(self.run_gate([{"type": "trust_me"}])["passed"])
 
@@ -340,6 +453,24 @@ class ClaimGateTest(unittest.TestCase):
         self.assertTrue(r["passed"])
         self.assertFalse(os.path.exists(os.path.join(self.d, "a")))
 
+    def test_one_select_with_a_trailing_comment_is_fine(self):
+        r = self.run_gate([{"type": "sqlite_scalar", "db": self.db, "query": "SELECT 1; -- comment", "op": "==", "value": 1}])
+        self.assertTrue(r["passed"], r["results"][0]["detail"])
+
+    def test_unreadable_db_location_is_not_a_missing_db(self):
+        if os.geteuid() == 0:
+            self.skipTest("root ignores permissions")
+        locked = os.path.join(self.d, "locked_db")
+        os.makedirs(locked)
+        c = {"type": "sqlite_scalar", "db": os.path.join(locked, "x.db"), "query": "SELECT 1", "op": "==", "value": 1}
+        os.chmod(locked, 0)
+        try:
+            r = self.run_gate([c])["results"][0]
+            self.assertFalse(r["ok"])
+            self.assertTrue(r["malformed"], r["detail"])
+        finally:
+            os.chmod(locked, 0o755)
+
     def test_nan_and_infinity_are_rejected(self):
         old = os.path.join(self.d, "old.csv")
         with open(old, "w") as f:
@@ -427,6 +558,13 @@ class ClaimGateTest(unittest.TestCase):
         self.assertFalse(self._with_path(b, [{"type": "pm2_status", "name": "api"}])["passed"])
         b = self._fake_command("pm2", "echo '[{\"name\":\"api\",\"pm2_env\":{\"status\":\"online\"}}]'; exit 3\n")
         self.assertFalse(self._with_path(b, [{"type": "pm2_status", "name": "api"}])["passed"])
+
+    def test_unexpected_pm2_answer_is_unverifiable(self):
+        for answer in ("{}", "[null]", '[{"name": "api"}]', '[{"name": "api", "pm2_env": {}}]'):
+            b = self._fake_command("pm2", "echo '%s'\n" % answer)
+            r = self._with_path(b, [{"type": "pm2_status", "name": "api"}])["results"][0]
+            self.assertFalse(r["ok"])
+            self.assertTrue(r["malformed"], (answer, r["detail"]))
 
     def test_failing_pgrep_is_not_a_match(self):
         b = self._fake_command("pgrep", "echo 123; exit 2\n")

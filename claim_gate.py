@@ -31,7 +31,7 @@ Manifest example:
   ]
 }
 """
-import sys, os, json, re, glob, fnmatch, stat, sqlite3, urllib.parse, subprocess, operator, collections, math
+import sys, os, json, re, glob, fnmatch, stat, sqlite3, hashlib, datetime, urllib.parse, subprocess, operator, collections, math
 
 OPS = {"==": operator.eq, "!=": operator.ne, ">": operator.gt, ">=": operator.ge,
        "<": operator.lt, "<=": operator.le}
@@ -52,14 +52,123 @@ def _glob1(path):
     return max(hits)[1] if hits else None
 
 
+class Unverifiable(RuntimeError):
+    """The system could not be looked at (unreadable file, failing command, no HTTP response). A failure that
+    says nothing about the work, so it is never excusable by --known-good either."""
+
+
+class BadCheck(ValueError):
+    """The check is written wrongly (not the work). Always a failure, never excusable by --known-good."""
+
+
+# Fields each check type must have. Checked before running, so a broken check is always reported as such.
+REQUIRED = {"file_exists": ("path",), "file_absent": ("path",), "file_contains": ("path",),
+            "sqlite_scalar": ("db", "query", "op", "value"), "pm2_status": ("name",), "process_running": ("pattern",),
+            "git_changed": ("repo",), "output_fresh": ("path",), "glob_count": ("path", "value"),
+            "http_status": ("url",), "log_not_contains": ("path", "substring")}
+
+
+def _sql_statements(q):
+    """Split SQL on ";" outside quotes, dropping -- and /* */ comments (so a trailing comment is not a statement)."""
+    out, cur, i, n = [], [], 0, len(q)
+    while i < n:
+        ch = q[i]
+        if ch in "'\"`[":
+            close = "]" if ch == "[" else ch
+            j = i + 1
+            while j < n and q[j] != close:
+                j += 1
+            cur.append(q[i:j + 1]); i = j + 1; continue
+        if q.startswith("--", i):
+            j = q.find("\n", i); i = n if j < 0 else j; continue
+        if q.startswith("/*", i):
+            j = q.find("*/", i + 2); i = n if j < 0 else j + 2; continue
+        if ch == ";":
+            out.append("".join(cur)); cur = []; i += 1; continue
+        cur.append(ch); i += 1
+    out.append("".join(cur))
+    return out
+
+
+# Fields each check type may have (besides "type" and "label"). Anything else is a typo, e.g. "min_szie",
+# which would otherwise be ignored silently and make the check weaker than written.
+ALLOWED = {"file_exists": ("path", "min_size", "mtime_after"), "file_absent": ("path",),
+           "file_contains": ("path", "substring", "regex"), "sqlite_scalar": ("db", "query", "op", "value"),
+           "pm2_status": ("name", "expect"), "process_running": ("pattern",), "git_changed": ("repo", "path"),
+           "output_fresh": ("path", "max_age_hours", "min_size"),
+           "glob_count": ("path", "op", "value", "min_size", "max_age_hours"),
+           "http_status": ("url", "op", "value", "timeout"), "log_not_contains": ("path", "substring", "tail_lines")}
+
+
+def _validate(c):
+    t = c.get("type")
+    unknown = sorted(k for k in c if k not in ("type", "label") + ALLOWED.get(t, ()))
+    if unknown:
+        raise BadCheck("%s does not take %s" % (t, ", ".join(unknown)))
+    missing = [k for k in REQUIRED.get(t, ()) if k not in c]
+    if missing:
+        raise BadCheck("%s needs %s" % (t, ", ".join(missing)))
+    if t == "file_contains" and ("substring" in c) == ("regex" in c):
+        raise BadCheck("give substring or regex, not both" if "substring" in c else "substring/regex not given")
+    if "regex" in c:
+        try:
+            re.compile(c["regex"])
+        except (re.error, TypeError) as e:
+            raise BadCheck(f"regex does not compile: {e}")
+    # Every optional field is checked for its type up front too, so that whether a field is broken never
+    # depends on what the system looks like (e.g. a bad date that is only parsed when the file exists).
+    for k in ("path", "db", "query", "name", "pattern", "repo", "url", "regex", "expect", "label", "mtime_after"):
+        if k in c and not isinstance(c[k], str):
+            raise BadCheck(f"{k} must be a string")
+    if "substring" in c:
+        sub = c["substring"]
+        as_list = t == "log_not_contains" and isinstance(sub, list) and sub and all(isinstance(x, str) for x in sub)
+        if not (isinstance(sub, str) or as_list):
+            raise BadCheck("substring must be a string (a list of strings is allowed only for log_not_contains)")
+    for k in ("max_age_hours", "timeout", "min_size", "tail_lines"):
+        if k in c and (isinstance(c[k], bool) or not isinstance(c[k], (int, float, str))):
+            raise BadCheck(f"{k} must be a number")
+    if "op" in c and c["op"] not in OPS:
+        raise BadCheck(f"unknown operator {c['op']}")
+    if t in ("glob_count", "http_status") and "value" in c and (isinstance(c["value"], bool) or not isinstance(c["value"], int)):
+        raise BadCheck(f"{t} value must be a whole number")
+    if t == "sqlite_scalar":
+        q = c["query"].strip()
+        if not q.lower().startswith("select"):
+            raise BadCheck("only SELECT is allowed (read-only)")
+        # Syntax, and "exactly one statement", are checked by SQLite itself on an empty in-memory database,
+        # before (and whether or not) the real one exists. Python's sqlite3 refuses a second statement but
+        # accepts a trailing comment.
+        if len([x for x in _sql_statements(q) if x.strip()]) != 1:
+            raise BadCheck("query must be exactly one SELECT statement")
+        mem = sqlite3.connect(":memory:")
+        try:
+            mem.execute("EXPLAIN " + q)
+        except (sqlite3.Error, sqlite3.Warning) as e:
+            msg = str(e)
+            if not msg.startswith(("no such table", "no such column")):
+                raise BadCheck(f"SQL is not one valid statement: {msg}")
+        finally:
+            mem.close()
+        v = c["value"]
+        if isinstance(v, bool) or not isinstance(v, (int, float, str)):
+            raise BadCheck("sqlite_scalar value must be a number or a string")
+    if "mtime_after" in c:
+        import datetime as _dt
+        try:
+            _dt.datetime.fromisoformat(c["mtime_after"])
+        except ValueError as e:
+            raise BadCheck(f"mtime_after is not an ISO date: {e}")
+
+
 def _cmp(actual, op, expected):
     fn = OPS.get(op)
     if not fn:
-        return False, f"unknown operator {op}"
+        raise BadCheck(f"unknown operator {op}")
     try:
         return bool(fn(actual, expected)), ""
-    except Exception as e:
-        return False, str(e)
+    except TypeError as e:  # e.g. comparing a number with a string: the check is written wrongly
+        raise BadCheck(f"cannot compare {actual!r} {op} {expected!r}: {e}")
 
 
 def check_file_exists(c):
@@ -83,7 +192,7 @@ def check_file_absent(c):
     try:
         hits = _strict_glob(c["path"])
     except OSError as e:
-        return False, f"cannot check {c['path']}: {e}"
+        raise Unverifiable(f"cannot check {c['path']}: {e}")
     return (not hits), ("absent as expected" if not hits else f"must not exist: {hits[0]}")
 
 
@@ -109,7 +218,10 @@ def _strict_glob(pattern):
         nxt = []
         for base in paths:
             if glob.has_magic(part):
-                names = os.listdir(base or ".")  # PermissionError propagates
+                try:
+                    names = os.listdir(base or ".")  # PermissionError propagates
+                except (FileNotFoundError, NotADirectoryError):
+                    continue  # a directory that is not there simply has no matches
                 if not part.startswith("."):
                     names = [n for n in names if not n.startswith(".")]
                 cands = [os.path.join(base, n) for n in fnmatch.filter(names, part)]
@@ -140,16 +252,16 @@ def check_file_contains(c):
         with open(p, encoding="utf-8", errors="replace") as fh:
             txt = fh.read()
     except Exception as e:
-        return False, f"read failed: {e}"
+        raise Unverifiable(f"read failed: {e}")
     if "substring" in c and "regex" in c:
-        return False, "give substring or regex, not both"
+        raise BadCheck("give substring or regex, not both")
     if "substring" in c:
         ok = c["substring"] in txt
         return ok, ("contains" if ok else f"substring not found: {c['substring'][:40]!r}")
     if "regex" in c:
         ok = re.search(c["regex"], txt) is not None
         return ok, ("matches" if ok else f"regex not matched: {c['regex'][:40]}")
-    return False, "substring/regex not given"
+    raise BadCheck("substring/regex not given")
 
 
 def _is_wal_file(db):
@@ -191,20 +303,24 @@ def _ro_connect(db):
 
 def check_sqlite_scalar(c):
     db = c["db"]
-    if not os.path.exists(db):
-        return False, f"DB missing: {db}"
     q = c["query"].strip()
-    if "op" not in c or "value" not in c:
-        return False, "sqlite_scalar needs both op and value (a bare query would pass on any row)"
-    if not q.lower().startswith("select"):
-        return False, "only SELECT is allowed (read-only)"
+    if not q.lower().startswith("select"):  # written-wrong checks first, before looking at the system
+        raise BadCheck("only SELECT is allowed (read-only)")
+    try:
+        os.stat(db)  # os.path.exists would also say "missing" when the path cannot be read
+    except FileNotFoundError:
+        # Without the database the query cannot run, so the claim cannot be looked at (and a broken query
+        # could not be told from a fine one). Still a failure, but never excusable by --known-good.
+        raise Unverifiable(f"DB missing: {db}")
+    except OSError as e:
+        raise Unverifiable(f"cannot check {db}: {e}")
     note = ""
     # Opened read-only (mode=ro) and with query_only, so the connection itself cannot write.
     conn = _ro_connect(db)
     try:
         row = conn.execute(q).fetchone()
-    except Exception as e:  # noqa: BLE001
-        return False, f"SQL failed: {e}"
+    except Exception as e:  # noqa: BLE001  (a query that does not run is a broken check, not evidence)
+        raise BadCheck(f"SQL failed: {e}")
     finally:
         conn.close()
     # No row, or NULL, is never a pass: "the query returned nothing" must not satisfy op "!=".
@@ -222,12 +338,19 @@ def check_pm2_status(c):
     try:
         r = subprocess.run(["pm2", "jlist"], capture_output=True, text=True, timeout=30)
         if r.returncode != 0:
-            return False, f"pm2 jlist exited {r.returncode}: {r.stderr.strip()[:80]}"
+            raise Unverifiable(f"pm2 jlist exited {r.returncode}: {r.stderr.strip()[:80]}")
         arr = json.loads(r.stdout)
+        # An unexpected answer is "could not look", not "no such process".
+        if not isinstance(arr, list) or not all(isinstance(p, dict) and isinstance(p.get("name"), str)
+                                                and isinstance(p.get("pm2_env"), dict)
+                                                and isinstance(p["pm2_env"].get("status"), str) for p in arr):
+            raise Unverifiable(f"pm2 jlist did not return a list of processes: {r.stdout.strip()[:60]!r}")
+    except Unverifiable:
+        raise
     except Exception as e:
-        return False, f"pm2 jlist failed: {e}"
+        raise Unverifiable(f"pm2 jlist failed: {e}")
     # Every process with that name (cluster instances, duplicates) must be in the expected state.
-    sts = [p.get("pm2_env", {}).get("status", "?") for p in arr if isinstance(p, dict) and p.get("name") == name]
+    sts = [p["pm2_env"]["status"] for p in arr if isinstance(p, dict) and p.get("name") == name]
     if not sts:
         return False, f"no pm2 process {name}"
     ok = all(st == expect for st in sts)
@@ -239,9 +362,9 @@ def check_process_running(c):
     try:
         r = subprocess.run(["pgrep", "-f", "--", pat], capture_output=True, text=True, timeout=15)
     except Exception as e:
-        return False, f"pgrep failed: {e}"
+        raise Unverifiable(f"pgrep failed: {e}")
     if r.returncode not in (0, 1):  # 0 = found, 1 = none, anything else = pgrep itself failed
-        return False, f"pgrep exited {r.returncode}: {r.stderr.strip()[:80]}"
+        raise Unverifiable(f"pgrep exited {r.returncode}: {r.stderr.strip()[:80]}")
     pids = [x for x in r.stdout.split() if x]
     return (r.returncode == 0 and len(pids) > 0), (f"PID {','.join(pids)}" if pids else f"no process: {pat}")
 
@@ -258,11 +381,23 @@ def check_git_changed(c):
         rl = subprocess.run(["git", "--no-optional-locks", "--literal-pathspecs", "-c", "core.fsmonitor=false", "-C", repo, "log", "-1", "--oneline"] + spec,
                             capture_output=True, text=True, timeout=20)
     except Exception as e:
-        return False, f"git failed: {e}"
+        raise Unverifiable(f"git failed: {e}")
     if rs.returncode != 0:
-        return False, f"git status failed (exit {rs.returncode}): {rs.stderr.strip()[:80]}"
-    # git log exits non-zero in a repository with no commits yet: that only means "no history".
-    diff, log = rs.stdout.strip(), (rl.stdout.strip() if rl.returncode == 0 else "")
+        raise Unverifiable(f"git status failed (exit {rs.returncode}): {rs.stderr.strip()[:80]}")
+    diff, log = rs.stdout.strip(), rl.stdout.strip()
+    if rl.returncode != 0:
+        # git log also fails in a repository with no commits yet; only that case means "no history".
+        # "Unborn": HEAD names a branch whose ref does not exist yet. Anything else (a broken HEAD, a missing
+        # object, ...) means the history could not be read.
+        g = ["git", "--no-optional-locks", "-C", repo]
+        sym = subprocess.run(g + ["symbolic-ref", "-q", "HEAD"], capture_output=True, text=True, timeout=20)
+        ref = sym.stdout.strip()
+        unborn = (sym.returncode == 0 and ref.startswith("refs/heads/") and
+                  subprocess.run(g + ["show-ref", "--verify", "--quiet", ref], capture_output=True,
+                                 timeout=20).returncode == 1)
+        if not unborn:
+            raise Unverifiable(f"git log failed (exit {rl.returncode}): {rl.stderr.strip()[:80]}")
+        log = ""
     if diff:
         return True, f"working tree changed: {diff[:60]}"
     if log:
@@ -307,7 +442,7 @@ def check_glob_count(c):
         # strict: an unreadable directory or file must not count as "0 files" (op "==" 0 would pass)
         hits = [h for h in _strict_glob(pattern) if _is_file_strict(h)]
     except OSError as e:
-        return False, f"cannot list {pattern}: {e}"
+        raise Unverifiable(f"cannot list {pattern}: {e}")
     if c.get("min_size") is not None:
         hits = [h for h in hits if os.path.getsize(h) >= int(c["min_size"])]
     if c.get("max_age_hours") is not None:
@@ -323,7 +458,7 @@ def check_http_status(c):
     url = c["url"]
     expect = c.get("value", 200)
     if not url.startswith(("http://", "https://")):
-        return False, f"url must start with http:// or https:// (got {url[:40]!r})"
+        raise BadCheck(f"url must start with http:// or https:// (got {url[:40]!r})")
     try:
         r = subprocess.run(
             # -q (must be first): ignore ~/.curlrc, so no config can turn this into a write or a PUT/POST.
@@ -334,10 +469,10 @@ def check_http_status(c):
         # exactly one 3-digit status: "[1-2]" globbing is off, but never trust a concatenated "200200"
         code = int(out) if len(out) == 3 and out.isdigit() else 0
     except Exception as e:  # noqa: BLE001
-        return False, f"fetch failed: {e}"
+        raise Unverifiable(f"fetch failed: {e}")
     # No HTTP response at all (DNS, refused, timeout) is never a pass, whatever op/value say.
     if r.returncode != 0 or code == 0:
-        return False, f"no HTTP response (curl exit {r.returncode}, code {code:03d})"
+        raise Unverifiable(f"no HTTP response (curl exit {r.returncode}, code {code:03d})")
     ok, err = _cmp(code, c.get("op", "=="), expect)
     return ok, err or f"HTTP {code} (expected {c.get('op', '==')} {expect})"
 
@@ -355,7 +490,7 @@ def check_log_not_contains(c):
         with open(path, "rb") as f:
             tail = [line.decode("utf-8", "replace") for line in collections.deque(f, maxlen=n)]
     except Exception as e:  # noqa: BLE001
-        return False, f"unreadable: {e}"
+        raise Unverifiable(f"unreadable: {e}")
     subs = c["substring"] if isinstance(c["substring"], list) else [c["substring"]]
     text = "".join(tail)  # lines keep their newlines, so a multi-line forbidden string is found too
     hit = [s for s in subs if s in text]
@@ -409,32 +544,83 @@ def _bad_number(c):
 
 def _run_one(i, c):
     """One check. Anything unexpected (bad shape, bad type, an exception) is a FAIL, never a crash."""
+    # "malformed": the check is broken (not an object, unknown type, bad fields) or could not look at the system
+    # (Unverifiable, or any exception). Such a failure says nothing about the work and is never excused by history.
     if not isinstance(c, dict):
-        return {"i": i, "type": None, "ok": False, "detail": f"check must be an object, got {c!r}"[:120], "label": ""}
+        return {"i": i, "type": None, "ok": False, "malformed": True,
+                "detail": f"check must be an object, got {c!r}"[:120], "label": ""}
     t = c.get("type")
     label = c.get("label", "") if isinstance(c.get("label", ""), str) else ""
     fn = CHECKERS.get(t) if isinstance(t, str) else None
     if not fn:
-        return {"i": i, "type": str(t), "ok": False, "detail": f"unknown check type: {t!r}"[:120], "label": label}
+        return {"i": i, "type": str(t), "ok": False, "malformed": True,
+                "detail": f"unknown check type: {t!r}"[:120], "label": label}
+    malformed = False
     try:
         bad = _bad_number(c)
-        ok, detail = (False, bad) if bad else fn(c)
+        if bad:
+            ok, detail, malformed = False, bad, True
+        else:
+            _validate(c)
+            ok, detail = fn(c)
+    except (BadCheck, Unverifiable) as e:
+        ok, detail, malformed = False, str(e), True
     except Exception as e:  # noqa: BLE001
-        ok, detail = False, f"check raised: {e}"
-    return {"i": i, "type": t, "ok": bool(ok), "detail": detail, "label": label}
+        ok, detail, malformed = False, f"check raised: {e}", True
+    return {"i": i, "type": t, "ok": bool(ok), "malformed": malformed, "detail": detail, "label": label}
 
 
-def verify(manifest):
+def check_key(c):
+    """A stable name for a check across runs: its label (if any) plus a hash of its content, so that a
+    changed check is a different check."""
+    body = {k: v for k, v in c.items() if k != "label"} if isinstance(c, dict) else c
+    h = hashlib.sha1(json.dumps(body, sort_keys=True, ensure_ascii=False, default=str).encode()).hexdigest()[:12]
+    label = c.get("label") if isinstance(c, dict) and isinstance(c.get("label"), str) else ""
+    return "%s#%s" % (label, h) if label else "sha1:" + h
+
+
+def unsound_keys(known_good, task=""):
+    """Checks that failed in a run someone confirmed was correct. Only runs of the same, named task count:
+    without a task name on both sides nothing is untrusted."""
+    bad = set()
+    if not task:
+        return bad
+    for run in known_good or []:
+        if not isinstance(run, dict) or run.get("task") != task or not isinstance(run.get("results"), list):
+            continue  # a line of the wrong shape is skipped: it can only make fewer checks untrusted
+        for r in run["results"]:
+            # Only a failure where the system was looked at and the condition was false counts ("observed").
+            if (isinstance(r, dict) and r.get("ok") is False and r.get("observed") is True
+                    and isinstance(r.get("key"), str) and r["key"]):
+                bad.add(r["key"])
+    return bad
+
+
+def verify(manifest, known_good=None):
+    """known_good: earlier runs (as written by --history) that were confirmed correct. A check that failed in
+    any of them (same task, same check content) is untrusted: it is still run and reported, but it neither
+    passes nor fails the manifest (filtering generated postconditions against known-correct executions, as in
+    nl2postcond and DeCon). The verdict comes from the trusted checks only; if none is left, it fails."""
     if not isinstance(manifest, dict) or not isinstance(manifest.get("checks", []), list):
         return {"task": "", "passed": False, "total": 0, "failed": 0,
                 "results": [], "error": "manifest must be an object with a list of checks"}
     checks = manifest.get("checks", [])
+    unsound = unsound_keys(known_good, manifest.get("task", ""))
     results = []
     for i, c in enumerate(checks):
-        results.append(_run_one(i, c))
-    passed = all(r["ok"] for r in results) if results else False
+        r = _run_one(i, c)
+        r["key"] = check_key(c)
+        if not r["malformed"] and r["key"] in unsound:
+            r["ignored"] = True
+            r["detail"] += " (untrusted: this check failed on a known-good run; not used for the verdict)"
+        results.append(r)
+    trusted = [r for r in results if not r.get("ignored")]
+    if results and not trusted:
+        return {"task": manifest.get("task", ""), "passed": False, "total": len(results), "failed": 0,
+                "results": results, "error": "every check is untrusted; nothing left to verify"}
+    passed = all(r["ok"] for r in trusted) if trusted else False
     return {"task": manifest.get("task", ""), "passed": passed,
-            "total": len(results), "failed": sum(1 for r in results if not r["ok"]),
+            "total": len(results), "failed": sum(1 for r in trusted if not r["ok"]),
             "results": results}
 
 
@@ -446,11 +632,41 @@ def _usage_error(msg, as_json):
     sys.exit(2)
 
 
+def _read_jsonl(path):
+    out = []
+    with open(path, encoding="utf-8") as fh:
+        for line in fh:
+            line = line.strip()
+            if line:
+                out.append(json.loads(line))
+    return out
+
+
 def main():
-    args = [a for a in sys.argv[1:] if a != "--json"]
-    as_json = "--json" in sys.argv
+    argv = sys.argv[1:]
+    as_json = "--json" in argv
+    opts = {}
+    args = []
+    i = 0
+    while i < len(argv):
+        a = argv[i]
+        if a in ("--history", "--known-good"):
+            if i + 1 >= len(argv):
+                _usage_error("%s needs a file" % a, as_json)
+            opts[a] = argv[i + 1]
+            i += 2
+            continue
+        if a != "--json":
+            args.append(a)
+        i += 1
     if not args:
-        _usage_error("usage: claim_gate.py <manifest.json|-> [--json]", as_json)
+        _usage_error("usage: claim_gate.py <manifest.json|-> [--json] [--history FILE] [--known-good FILE]", as_json)
+    known_good = None
+    if "--known-good" in opts:
+        try:
+            known_good = _read_jsonl(opts["--known-good"])
+        except (OSError, UnicodeDecodeError, ValueError) as e:
+            _usage_error(f"cannot read known-good runs {opts['--known-good']}: {e}", as_json)
     src = args[0]
     try:
         if src == "-":
@@ -461,14 +677,29 @@ def main():
         manifest = json.loads(raw)
     except (OSError, UnicodeDecodeError, ValueError) as e:
         _usage_error(f"cannot read manifest {src}: {e}", as_json)
-    rep = verify(manifest)
+    try:
+        rep = verify(manifest, known_good=known_good)
+    except Exception as e:  # noqa: BLE001  last line of defence: never leave without a verdict
+        _usage_error(f"internal error, nothing was accepted: {type(e).__name__}: {e}", as_json)
+    if "--history" in opts:  # one line per run: which checks held. Copy confirmed-good lines into a --known-good file
+        line = {"at": datetime.datetime.now().isoformat(timespec="seconds"), "task": rep.get("task", ""),
+                "passed": rep["passed"],
+                "results": [{"key": r["key"], "ok": r["ok"], "observed": not r.get("malformed", False)} for r in rep["results"]]}
+        try:
+            with open(opts["--history"], "a", encoding="utf-8") as fh:
+                fh.write(json.dumps(line, ensure_ascii=False) + "\n")
+        except OSError as e:
+            _usage_error(f"cannot write history {opts['--history']}: {e}", as_json)
     if as_json:
         print(json.dumps(rep, ensure_ascii=False, indent=2))
     else:
         mark = "✅ PASS" if rep["passed"] else "🔴 FAIL"
-        print(f"{mark}  {rep['task']}  ({rep['total']-rep['failed']}/{rep['total']} checks)")
+        trusted = [r for r in rep["results"] if not r.get("ignored")]
+        n_ok = sum(1 for r in trusted if r["ok"])
+        extra = f", {len(rep['results']) - len(trusted)} untrusted" if len(trusted) < len(rep["results"]) else ""
+        print(f"{mark}  {rep['task']}  ({n_ok}/{len(trusted)} checks{extra})")
         for r in rep["results"]:
-            m = "  ✓" if r["ok"] else "  ✗"
+            m = "  ✓" if r["ok"] else ("  !" if r.get("ignored") else "  ✗")
             lbl = f"[{r['label']}] " if r.get("label") else ""
             print(f"{m} {lbl}{r['type']}: {r['detail']}")
     sys.exit(0 if rep["passed"] else 1)

@@ -84,6 +84,41 @@
    ],
    "source": "file:evaluation/related-work-links.txt",
    "what": "Related work: arXiv IDs, publication years and the URL of agent-completion-verifier (Luca-1304), each link fetched"
+  },
+  {
+   "values": [
+    "2501.02901"
+   ],
+   "source": "file:evaluation/related-work-links.txt",
+   "what": "DeCon arXiv ID (link fetched)"
+  },
+  {
+   "values": [
+    "60",
+    "19",
+    "38",
+    "7",
+    "0",
+    "2",
+    "1",
+    "37",
+    "41",
+    "30",
+    "33",
+    "27",
+    "28",
+    "105",
+    "120"
+   ],
+   "source": "file:evaluation/calibration-tau2.json",
+   "what": "known-good calibration result on tau2-bench"
+  },
+  {
+   "values": [
+    "2310.01831"
+   ],
+   "source": "file:evaluation/related-work-links.txt",
+   "what": "nl2postcond arXiv ID (link fetched)"
   }
  ]
 }

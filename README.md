@@ -4,7 +4,7 @@
 
 When you hand work to a coding agent, a sub-agent, or an unattended `claude -p` / `codex exec` run, the last thing you get back is a report like "Done — updated the scheduler, backfilled the table, restarted the worker." That report is generated text, not an execution result.
 
-claim-gate makes the agent hand over a **manifest of verifiable claims** instead, and checks each claim against the real system: files, database rows, processes, git history, fresh outputs, HTTP status, logs. If any single claim does not hold, the whole manifest fails and the exit code is non-zero, so a pipeline can refuse the work automatically.
+claim-gate makes the agent hand over a **manifest of verifiable claims** instead, and checks each claim against the real system: files, database rows, processes, git history, fresh outputs, HTTP status, logs. If any single claim does not hold, the whole manifest fails and the exit code is non-zero, so a pipeline can refuse the work automatically (the one exception is a check you have marked untrusted with `--known-good`, see below).
 
 - One file, Python 3 standard library only
 - Designed not to change your data (see the caveats at the end of this line): SQL is a `SELECT` on a read-only (`mode=ro`) connection, or, only when a WAL-mode database fails to open read-only (this happened on a production database whose `-shm` file was absent), on a `mode=rw` connection with `query_only` on; git runs without optional locks, process checks only observe, HTTP checks use `GET` (caveats: reading a SQLite database in WAL mode may create its `-wal`/`-shm` side files; `pm2 jlist` starts the pm2 daemon if it is not running; a `GET` is only as side-effect free as the server; the external commands `git`, `pm2`, `pgrep` and `curl` still run with your environment and their own configuration, such as git hooks)
@@ -65,7 +65,7 @@ python3 claim_gate.py manifest.json --json   # machine-readable report
 | `http_status` | a GET returns the expected status code |
 | `log_not_contains` | none of the given strings appears in the last `tail_lines` lines |
 
-An empty manifest never passes, and an unknown check type fails.
+An empty manifest never passes. An unknown check type, a field the type does not take (a typo such as `min_szie`), a missing required field, or a field of the wrong type makes that check fail.
 
 ## How we use it
 
@@ -106,6 +106,20 @@ claim-gate is not a new idea. It is a small, dependency-free version of things t
 - **Similar tools.** [agent-completion-verifier](https://github.com/Luca-1304/agent-completion-verifier) and [AgentVerify](https://github.com/aliasfoxkde/AgentVerify) check completion claims deterministically against state; [agent-claimcheck](https://github.com/B0yko/agent-claimcheck) combines rules, a classifier and an LLM judge over traces. If you need signed receipts, trace adapters or classifiers, look at those.
 
 What claim-gate adds is small: one file with only the Python standard library, check types aimed at unattended jobs (SQLite rows, pm2, fresh outputs, "did nothing" log lines), and failing closed when a claim cannot be checked.
+
+## Learning from known-good runs
+
+Checks written by a person or a model are sometimes too strict and reject work that was fine. If a job runs repeatedly, you can let past runs that were confirmed correct overrule those checks:
+
+```bash
+claim-gate manifest.json --history history.jsonl        # appends one line per run: which checks held
+# after someone confirms a run was correct, copy its line into known-good.jsonl
+claim-gate manifest.json --known-good known-good.jsonl  # a check that failed on a known-good run only warns
+```
+
+A check that failed on a known-good run of the same task is untrusted: it is still reported but does not count either way, and the verdict comes from the remaining checks. If no trusted check is left, the manifest fails. Only runs with the same `task` name count, so give the manifest a `task`; only a check that looked at the system and found the condition false can be excused: a malformed check (unknown type, bad or missing fields) and a check that could not look (unreadable file, failing command, no HTTP response) never are. A check is identified by its `label` together with a hash of its content, so editing a check makes it a new check. This is the idea of filtering generated postconditions against known-correct executions from [nl2postcond](https://arxiv.org/abs/2310.01831) and [DeCon](https://arxiv.org/abs/2501.02901).
+
+What we measured: on public tau2-bench trajectories, three LLMs wrote manifests from the customer's request, the policy and the records before the work, for 60 false successes and 60 correct runs. Dropping malformed checks and checks that failed on a known-correct earlier run of the same task cut correct runs rejected from 19, 38 and 7 to 0, 2 and 1 (out of 60), while false successes rejected went from 37, 41 and 30 to 33, 27 and 28 ([evaluation/calibration-tau2.json](evaluation/calibration-tau2.json)). In that experiment malformed checks were dropped; claim-gate instead fails on them, so with the CLI malformed checks would add rejections. It only applies when correct earlier runs of the same task exist (105 of the 120 runs had them), and the sample was balanced by design, so these are not production rates.
 
 ## Limits
 
